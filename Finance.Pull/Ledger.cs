@@ -34,6 +34,49 @@ public sealed class Ledger : IDisposable
             """);
     }
 
+    /// <summary>Re-applies Claude's category rules to every transaction (cheap: a few thousand rows).</summary>
+    public int ApplyCategories(Categoriser cat)
+    {
+        foreach (var col in new[] { "my_cat", "my_rule" })
+        {
+            try { Exec($"ALTER TABLE tx ADD COLUMN {col} TEXT"); } catch (SqliteException) { /* already there */ }
+        }
+        var rows = new List<(string id, string name, string type, string account)>();
+        using (var c = _db.CreateCommand())
+        {
+            c.CommandText = "SELECT id, COALESCE(name,''), COALESCE(type,''), account FROM tx";
+            using var r = c.ExecuteReader();
+            while (r.Read()) rows.Add((r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3)));
+        }
+        using var tr = _db.BeginTransaction();
+        foreach (var (id, name, type, account) in rows)
+        {
+            var (category, rule) = cat.Classify(id, name, type, account);
+            using var u = _db.CreateCommand();
+            u.CommandText = "UPDATE tx SET my_cat=$c, my_rule=$r WHERE id=$id";
+            u.Parameters.AddWithValue("$c", category); u.Parameters.AddWithValue("$r", rule); u.Parameters.AddWithValue("$id", id);
+            u.ExecuteNonQuery();
+        }
+        tr.Commit();
+        return rows.Count;
+    }
+
+    /// <summary>Last-90-day payments Claude couldn't categorise, biggest first, as markdown.</summary>
+    public string UnsortedMarkdown(DateOnly today)
+    {
+        var sb = new StringBuilder("# Unsorted payments (last 90 days)\n\n");
+        sb.Append($"Generated {DateTimeOffset.Now:dd/MM/yyyy HH:mm}. These payees have no rule in `categories.json` yet; the Morning Sweep reviews them. Excludes transfers, pots and Amex payments.\n\n");
+        sb.Append("| Payee | Type | Monzo category | Payments | Total | Latest |\n|---|---|---|---|---|---|\n");
+        using var c = _db.CreateCommand();
+        c.CommandText = $"SELECT name, type, category, COUNT(*), SUM(-amount_minor), MAX(date) FROM tx WHERE date>=$f AND amount_minor<0 AND my_cat='Unsorted' AND {NotSpend} GROUP BY name,type,category ORDER BY 5 DESC LIMIT 60";
+        c.Parameters.AddWithValue("$f", today.AddDays(-89).ToString("yyyy-MM-dd"));
+        using var r = c.ExecuteReader();
+        var any = false;
+        while (r.Read()) { any = true; sb.Append($"| {r.GetString(0)} | {r.GetString(1)} | {r.GetString(2)} | {r.GetInt64(3)} | {Gbp(r.GetInt64(4))} | {Fmt(r.GetString(5))} |\n"); }
+        if (!any) sb.Append("| none | | | | | |\n");
+        return sb.ToString();
+    }
+
     private void Exec(string sql) { using var c = _db.CreateCommand(); c.CommandText = sql; c.ExecuteNonQuery(); }
 
     /// <summary>Insert or update. A settled 'export' row is never overwritten by a 'daily' row;
@@ -103,14 +146,17 @@ public sealed class Ledger : IDisposable
     /// <summary>Rolling 30 days of payments by category (both accounts), as JSON rows for the Life dashboard.</summary>
     public string Spend30Json(DateOnly today)
     {
-        using var c = _db.CreateCommand();
-        c.CommandText = $"SELECT COALESCE(NULLIF(category,''),'Other'), COUNT(*), ROUND(SUM(-amount_minor)/100.0,2) FROM tx " +
-                        $"WHERE date>=$f AND date<=$t AND amount_minor<0 AND {NotSpend} GROUP BY 1 ORDER BY 3 DESC";
-        c.Parameters.AddWithValue("$f", today.AddDays(-29).ToString("yyyy-MM-dd"));
-        c.Parameters.AddWithValue("$t", today.ToString("yyyy-MM-dd"));
-        using var r = c.ExecuteReader();
         var rows = new List<object>();
-        while (r.Read()) rows.Add(new { category = r.GetString(0), payments = r.GetInt64(1), amount = r.GetDecimal(2) });
+        foreach (var (set, col) in new[] { ("monzo", "category"), ("claude", "my_cat") })
+        {
+            using var c = _db.CreateCommand();
+            c.CommandText = $"SELECT COALESCE(NULLIF({col},''),'Other'), COUNT(*), ROUND(SUM(-amount_minor)/100.0,2) FROM tx " +
+                            $"WHERE date>=$f AND date<=$t AND amount_minor<0 AND {NotSpend} GROUP BY 1 ORDER BY 3 DESC";
+            c.Parameters.AddWithValue("$f", today.AddDays(-29).ToString("yyyy-MM-dd"));
+            c.Parameters.AddWithValue("$t", today.ToString("yyyy-MM-dd"));
+            using var r = c.ExecuteReader();
+            while (r.Read()) rows.Add(new { set, category = r.GetString(0), payments = r.GetInt64(1), amount = r.GetDecimal(2) });
+        }
         return System.Text.Json.JsonSerializer.Serialize(rows);
     }
 

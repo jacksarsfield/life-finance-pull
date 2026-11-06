@@ -105,6 +105,10 @@ int Load(bool history)
     File.WriteAllText(coveragePath, ledger.CoverageMarkdown());
     File.WriteAllText(Path.Combine(Path.GetDirectoryName(ledgerPath)!, "summary.md"),
         ledger.SummaryMarkdown(statusPath, DailyCsvWriter.LocalDate(DateTimeOffset.UtcNow)));
+    var financeDir = Path.GetDirectoryName(ledgerPath)!;
+    var n = ledger.ApplyCategories(Categoriser.Load(Path.Combine(financeDir, "categories.json")));
+    Console.WriteLine($"Categorised {n} transactions");
+    File.WriteAllText(Path.Combine(financeDir, "unsorted.md"), ledger.UnsortedMarkdown(DailyCsvWriter.LocalDate(DateTimeOffset.UtcNow)));
     File.WriteAllText(Path.Combine(Path.GetDirectoryName(ledgerPath)!, "spend30.json"),
         ledger.Spend30Json(DailyCsvWriter.LocalDate(DateTimeOffset.UtcNow)));
     Console.WriteLine("Coverage: " + coveragePath);
