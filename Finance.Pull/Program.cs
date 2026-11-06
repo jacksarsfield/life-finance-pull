@@ -111,6 +111,13 @@ int Load(bool history)
     File.WriteAllText(Path.Combine(financeDir, "unsorted.md"), ledger.UnsortedMarkdown(DailyCsvWriter.LocalDate(DateTimeOffset.UtcNow)));
     File.WriteAllText(Path.Combine(Path.GetDirectoryName(ledgerPath)!, "spend30.json"),
         ledger.Spend30Json(DailyCsvWriter.LocalDate(DateTimeOffset.UtcNow)));
+    var dashDir = Path.Combine(financeDir, "dash");
+    Directory.CreateDirectory(dashDir);
+    var todayLocal = DailyCsvWriter.LocalDate(DateTimeOffset.UtcNow);
+    File.WriteAllText(Path.Combine(dashDir, "transactions.json"), ledger.TransactionsJson());
+    File.WriteAllText(Path.Combine(dashDir, "isa.json"), ledger.IsaJson(todayLocal));
+    File.WriteAllText(Path.Combine(dashDir, "personal60.json"), ledger.Personal60Json(todayLocal));
+    File.WriteAllText(Path.Combine(dashDir, "snapshots.json"), Snapshots.ToJson(Path.Combine(financeDir, "snapshots.md")));
     Console.WriteLine("Coverage: " + coveragePath);
     return 0;
 }
@@ -179,6 +186,12 @@ void WriteStatus(bool ok, string message, List<object> report)
         {
             source = "monzo", lastRun = now, lastSuccess = ok ? now : lastSuccess, ok, message, accounts = report,
         }, new JsonSerializerOptions { WriteIndented = true }));
+        var dashDir = Path.Combine(Path.GetDirectoryName(statusPath)!, "dash");
+        Directory.CreateDirectory(dashDir);
+        File.WriteAllText(Path.Combine(dashDir, "feed.json"), JsonSerializer.Serialize(new[]
+        {
+            new { source = "Monzo", last_run = now, last_success = ok ? now : lastSuccess, ok, message },
+        }));
     }
     catch { /* status is best-effort */ }
 }

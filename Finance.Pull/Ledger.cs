@@ -166,6 +166,55 @@ public sealed class Ledger : IDisposable
         return System.Text.Json.JsonSerializer.Serialize(rows);
     }
 
+    /// <summary>Every transaction, minimised (no notes, address or description; the Monzo transaction ID is the row key) for the Finance dashboard.</summary>
+    public string TransactionsJson()
+    {
+        using var c = _db.CreateCommand();
+        c.CommandText = "SELECT date, time, account, COALESCE(NULLIF(name,''),'(no name)'), COALESCE(type,''), COALESCE(category,''), COALESCE(my_cat,''), amount_minor, settled, " +
+                        $"CASE WHEN type IN ('Pot transfer','Monzo-to-Monzo') OR category IN ('Transfers','Savings') THEN 'internal' " +
+                        $"WHEN my_cat='Savings & investments' THEN 'savings' WHEN LOWER(name) LIKE '%american exp%' OR LOWER(name) LIKE '%amex%' THEN 'amex' " +
+                        $"WHEN amount_minor>0 THEN 'income' ELSE 'spend' END, id FROM tx ORDER BY date DESC, time DESC";
+        using var r = c.ExecuteReader();
+        var rows = new List<object>();
+        while (r.Read())
+            rows.Add(new
+            {
+                id = r.GetString(10), date = r.GetString(0), time = r.GetString(1), source = "Monzo", account = r.GetString(2), payee = r.GetString(3), type = r.GetString(4),
+                monzo_category = r.GetString(5), claude_category = r.GetString(6), amount = r.GetInt64(7) / 100m, pending = r.GetInt64(8) == 0, kind = r.GetString(9),
+            });
+        return System.Text.Json.JsonSerializer.Serialize(rows);
+    }
+
+    /// <summary>ISA allowance used this tax year, from payments to Plum in the ledger (an upper bound: assumes all went into an ISA).</summary>
+    public string IsaJson(DateOnly today)
+    {
+        var start = today >= new DateOnly(today.Year, 4, 6) ? new DateOnly(today.Year, 4, 6) : new DateOnly(today.Year - 1, 4, 6);
+        using var c = _db.CreateCommand();
+        c.CommandText = "SELECT COUNT(*), COALESCE(SUM(-amount_minor),0), COALESCE(MAX(date),'') FROM tx WHERE date>=$s AND amount_minor<0 AND my_cat='Savings & investments'";
+        c.Parameters.AddWithValue("$s", start.ToString("yyyy-MM-dd"));
+        using var r = c.ExecuteReader(); r.Read();
+        var paid = r.GetInt64(1) / 100m;
+        return System.Text.Json.JsonSerializer.Serialize(new[]
+        {
+            new { tax_year = $"{start.Year}/{(start.Year + 1) % 100:00}", allowance = 20000m, paid_in = paid, headroom = 20000m - paid, payments = r.GetInt64(0),
+                  last_payment = r.GetString(2), basis = "Upper bound: payments from Monzo to Plum, assuming all went into an ISA. Plum's app shows the exact figure." },
+        });
+    }
+
+    /// <summary>What still goes through the personal account (last 60 days), for the "moving to joint" page.</summary>
+    public string Personal60Json(DateOnly today)
+    {
+        using var c = _db.CreateCommand();
+        c.CommandText = "SELECT COALESCE(NULLIF(name,''),'(no name)'), type, my_cat, COUNT(*), ROUND(SUM(-amount_minor)/100.0,2), MAX(date) FROM tx " +
+                        "WHERE account='personal' AND date>=$f AND amount_minor<0 AND type NOT IN ('Pot transfer','Monzo-to-Monzo') AND category NOT IN ('Transfers','Savings') " +
+                        "GROUP BY 1,2,3 ORDER BY 5 DESC";
+        c.Parameters.AddWithValue("$f", today.AddDays(-59).ToString("yyyy-MM-dd"));
+        using var r = c.ExecuteReader();
+        var rows = new List<object>();
+        while (r.Read()) rows.Add(new { payee = r.GetString(0), type = r.GetString(1), claude_category = r.GetString(2), payments = r.GetInt64(3), total = r.GetDecimal(4), last = r.GetString(5) });
+        return System.Text.Json.JsonSerializer.Serialize(rows);
+    }
+
     /// <summary>Short, human-readable status for the Morning Sweep to read.</summary>
     public string SummaryMarkdown(string statusJsonPath, DateOnly today)
     {
