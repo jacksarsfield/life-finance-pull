@@ -5,3 +5,5 @@ obj/
 *.bin
 *.csv
 status.json
+publish/
+*.db

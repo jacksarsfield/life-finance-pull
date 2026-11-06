@@ -20,6 +20,8 @@ try
     {
         "auth" => await AuthAsync(),
         "pull" => await PullAsync(),
+        "load" => Load(args.Contains("--history")),
+        "sync" => await SyncAsync(),
         "selftest" => SelfTest(),
         _ => Fail($"Unknown command '{cmd}'. Use: auth | pull | selftest"),
     };
@@ -36,7 +38,8 @@ async Task<int> PullAsync()
 
     // Pull from the start of yesterday (local) so late-settling transactions get corrected, and rewrite both days.
     var today = DailyCsvWriter.LocalDate(DateTimeOffset.UtcNow);
-    var days = new[] { today.AddDays(-1), today };
+    var back = int.Parse(Opt("--days", "1")); // how many days before today to re-pull (Monzo only serves ~90 days without fresh approval)
+    var days = Enumerable.Range(0, back + 1).Select(i => today.AddDays(i - back)).ToArray();
     var startLocal = days[0].ToDateTime(TimeOnly.MinValue);
     var since = new DateTimeOffset(startLocal, DailyCsvWriter.London.GetUtcOffset(startLocal));
 
@@ -50,6 +53,44 @@ async Task<int> PullAsync()
         report.Add(new { account = acct.Label, transactions = txs.Count, files = files.Select(Path.GetFileName) });
     }
     WriteStatus(true, "ok", report);
+    return 0;
+}
+
+async Task<int> SyncAsync()
+{
+    var rc = await PullAsync();
+    return rc != 0 ? rc : Load(false);
+}
+
+// load           : merge inbox\monzo-<account>-*.csv into the ledger, then move them to documents\accounts\daily
+// load --history : merge Monzo's own CSV exports in documents\accounts (file name must contain PERSONAL or JOINT); files stay put
+int Load(bool history)
+{
+    var lifeRoot = Path.GetFullPath(Path.Combine(outDir, ".."));
+    var ledgerPath = Environment.GetEnvironmentVariable("LIFE_LEDGER") ?? Path.Combine(lifeRoot, "finance", "ledger.db");
+    var coveragePath = Path.Combine(Path.GetDirectoryName(ledgerPath)!, "coverage.md");
+    var archive = Path.Combine(lifeRoot, "documents", "accounts", "daily");
+    var dir = history ? Path.Combine(lifeRoot, "documents", "accounts") : outDir;
+    var files = Directory.GetFiles(dir, history ? "*.csv" : "monzo-*.csv").OrderBy(f => f).ToList();
+
+    using var ledger = new Ledger(ledgerPath);
+    foreach (var f in files)
+    {
+        var name = Path.GetFileName(f);
+        var account = name.Contains("PERSONAL", StringComparison.OrdinalIgnoreCase) || name.StartsWith("monzo-personal-") ? "personal"
+                    : name.Contains("JOINT", StringComparison.OrdinalIgnoreCase) || name.StartsWith("monzo-joint-") ? "joint" : null;
+        if (account == null) { Console.WriteLine($"skip (account unknown): {name}"); continue; }
+        var rows = CsvLoader.Read(f, account, history ? "export" : "daily");
+        var (ins, upd) = ledger.Upsert(rows);
+        Console.WriteLine($"{name}: {rows.Count} rows, {ins} new, {upd} updated");
+        if (!history)
+        {
+            Directory.CreateDirectory(archive);
+            File.Move(f, Path.Combine(archive, name), overwrite: true);
+        }
+    }
+    File.WriteAllText(coveragePath, ledger.CoverageMarkdown());
+    Console.WriteLine("Coverage: " + coveragePath);
     return 0;
 }
 
@@ -91,7 +132,16 @@ static string ReadSecret()
         else if (!char.IsControl(k.KeyChar)) sb.Append(k.KeyChar);
     }
     Console.WriteLine();
-    return sb.ToString();
+    var secret = sb.ToString().Trim();
+    Console.WriteLine($"({secret.Length} characters read)");
+    var half = secret.Length / 2;
+    if (secret.Length % 2 == 0 && half > 0 && secret[..half] == secret[half..])
+    {
+        Console.WriteLine($"Warning: the input is the same {half} characters twice (pasted twice?). Using one copy.");
+        secret = secret[..half];
+        Console.WriteLine($"({secret.Length} characters now)");
+    }
+    return secret;
 }
 
 void WriteStatus(bool ok, string message, List<object> report)
