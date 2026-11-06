@@ -41,17 +41,17 @@ public sealed class Ledger : IDisposable
         {
             try { Exec($"ALTER TABLE tx ADD COLUMN {col} TEXT"); } catch (SqliteException) { /* already there */ }
         }
-        var rows = new List<(string id, string name, string type, string account)>();
+        var rows = new List<(string id, string name, string type, string account, string desc)>();
         using (var c = _db.CreateCommand())
         {
-            c.CommandText = "SELECT id, COALESCE(name,''), COALESCE(type,''), account FROM tx";
+            c.CommandText = "SELECT id, COALESCE(name,''), COALESCE(type,''), account, COALESCE(description,'') FROM tx";
             using var r = c.ExecuteReader();
-            while (r.Read()) rows.Add((r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3)));
+            while (r.Read()) rows.Add((r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4)));
         }
         using var tr = _db.BeginTransaction();
-        foreach (var (id, name, type, account) in rows)
+        foreach (var (id, name, type, account, desc) in rows)
         {
-            var (category, rule) = cat.Classify(id, name, type, account);
+            var (category, rule) = cat.Classify(id, name, type, account, desc);
             using var u = _db.CreateCommand();
             u.CommandText = "UPDATE tx SET my_cat=$c, my_rule=$r WHERE id=$id";
             u.Parameters.AddWithValue("$c", category); u.Parameters.AddWithValue("$r", rule); u.Parameters.AddWithValue("$id", id);
@@ -140,7 +140,7 @@ public sealed class Ledger : IDisposable
     private static string Gbp(long minor) => (minor / 100m).ToString("C2", Gb);
 
     // Money moving between your own pots/accounts is not spend; Amex payments are listed separately.
-    private const string NotSpend = "type NOT IN ('Pot transfer','Monzo-to-Monzo') AND category NOT IN ('Transfers','Savings') " +
+    private const string NotSpend = "type NOT IN ('Pot transfer','Monzo-to-Monzo') AND category NOT IN ('Transfers','Savings') AND COALESCE(my_cat,'') <> 'Savings & investments' " +
                                     "AND LOWER(name) NOT LIKE '%american exp%' AND LOWER(name) NOT LIKE '%amex%'";
 
     /// <summary>Rolling 30 days of payments by category (both accounts), as JSON rows for the Life dashboard.</summary>
