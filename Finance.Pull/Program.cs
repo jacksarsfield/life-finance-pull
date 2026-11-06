@@ -22,6 +22,7 @@ try
         "pull" => await PullAsync(),
         "load" => Load(args.Contains("--history")),
         "sync" => await SyncAsync(),
+        "sql" => Sql(args[1]),
         "selftest" => SelfTest(),
         _ => Fail($"Unknown command '{cmd}'. Use: auth | pull | selftest"),
     };
@@ -53,6 +54,18 @@ async Task<int> PullAsync()
         report.Add(new { account = acct.Label, transactions = txs.Count, files = files.Select(Path.GetFileName) });
     }
     WriteStatus(true, "ok", report);
+    return 0;
+}
+
+// sql "<SELECT ...>" : read-only query against the ledger, tab-separated output
+int Sql(string query)
+{
+    var ledgerPath = Environment.GetEnvironmentVariable("LIFE_LEDGER") ?? Path.Combine(Path.GetFullPath(Path.Combine(outDir, "..")), "finance", "ledger.db");
+    using var db = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={ledgerPath};Mode=ReadOnly");
+    db.Open();
+    using var c = db.CreateCommand(); c.CommandText = query;
+    using var r = c.ExecuteReader();
+    while (r.Read()) Console.WriteLine(string.Join('\t', Enumerable.Range(0, r.FieldCount).Select(i => r.GetValue(i)?.ToString())));
     return 0;
 }
 
@@ -90,6 +103,8 @@ int Load(bool history)
         }
     }
     File.WriteAllText(coveragePath, ledger.CoverageMarkdown());
+    File.WriteAllText(Path.Combine(Path.GetDirectoryName(ledgerPath)!, "summary.md"),
+        ledger.SummaryMarkdown(statusPath, DailyCsvWriter.LocalDate(DateTimeOffset.UtcNow)));
     Console.WriteLine("Coverage: " + coveragePath);
     return 0;
 }

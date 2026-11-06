@@ -93,6 +93,72 @@ public sealed class Ledger : IDisposable
         return sb.ToString();
     }
 
+    private static readonly CultureInfo Gb = CultureInfo.GetCultureInfo("en-GB");
+    private static string Gbp(long minor) => (minor / 100m).ToString("C2", Gb);
+
+    // Money moving between your own pots/accounts is not spend; Amex payments are listed separately.
+    private const string NotSpend = "type NOT IN ('Pot transfer','Monzo-to-Monzo') AND category NOT IN ('Transfers','Savings') " +
+                                    "AND LOWER(name) NOT LIKE '%american exp%' AND LOWER(name) NOT LIKE '%amex%'";
+
+    /// <summary>Short, human-readable status for the Morning Sweep to read.</summary>
+    public string SummaryMarkdown(string statusJsonPath, DateOnly today)
+    {
+        var sb = new StringBuilder("# Finance summary (Monzo only)\n\n");
+        sb.Append($"Generated {DateTimeOffset.Now:dd/MM/yyyy HH:mm}. Source: `finance/ledger.db` (Monzo exports + API pulls). Amex spend is not in here.\n\n");
+
+        sb.Append("## Feed freshness\n");
+        try
+        {
+            var st = System.Text.Json.JsonDocument.Parse(File.ReadAllText(statusJsonPath)).RootElement;
+            var last = st.GetProperty("lastSuccess").GetString();
+            var ok = st.GetProperty("ok").GetBoolean();
+            sb.Append($"- Last successful pull: {(last is null ? "never" : DateTimeOffset.Parse(last).ToString("dd/MM/yyyy HH:mm"))}. Last run {(ok ? "succeeded" : "FAILED: " + st.GetProperty("message").GetString())}.\n");
+        }
+        catch { sb.Append("- No status.json found: the puller has not run.\n"); }
+
+        var from = today.AddDays(-6).ToString("yyyy-MM-dd");
+        sb.Append($"\n## Last 7 days ({Fmt(from)} to {today:dd/MM/yyyy})\n");
+        sb.Append("Out-of-pocket card/bank payments, excluding pot and own-account transfers and Amex payments. Not all of this is a household *cost* (it includes payments to family).\n\n");
+        sb.Append("| Account | Payments | Total out |\n|---|---|---|\n");
+        using (var c = _db.CreateCommand())
+        {
+            c.CommandText = $"SELECT account, COUNT(*), SUM(-amount_minor) FROM tx WHERE date>=$f AND amount_minor<0 AND {NotSpend} GROUP BY account ORDER BY account";
+            c.Parameters.AddWithValue("$f", from);
+            using var r = c.ExecuteReader();
+            while (r.Read()) sb.Append($"| {r.GetString(0)} | {r.GetInt64(1)} | {Gbp(r.GetInt64(2))} |\n");
+        }
+
+        sb.Append("\n## Payments of £500 or more (last 7 days)\n");
+        var big = 0;
+        using (var c = _db.CreateCommand())
+        {
+            c.CommandText = $"SELECT date, account, name, -amount_minor FROM tx WHERE date>=$f AND amount_minor<=-50000 AND {NotSpend} ORDER BY date DESC";
+            c.Parameters.AddWithValue("$f", from);
+            using var r = c.ExecuteReader();
+            while (r.Read()) { big++; sb.Append($"- {Fmt(r.GetString(0))} {r.GetString(1)}: {r.GetString(2)} {Gbp(r.GetInt64(3))}\n"); }
+        }
+        if (big == 0) sb.Append("- None\n");
+
+        sb.Append("\n## Amex payments from Monzo\n");
+        using (var c = _db.CreateCommand())
+        {
+            c.CommandText = "SELECT date, account, -amount_minor FROM tx WHERE amount_minor<0 AND (LOWER(name) LIKE '%american exp%' OR LOWER(name) LIKE '%amex%') ORDER BY date DESC LIMIT 4";
+            using var r = c.ExecuteReader();
+            var any = false;
+            while (r.Read()) { any = true; sb.Append($"- {Fmt(r.GetString(0))} from {r.GetString(1)}: {Gbp(r.GetInt64(2))}\n"); }
+            if (!any) sb.Append("- None found by name (check how Amex appears in the exports)\n");
+        }
+        var due = today.Day <= 18 ? new DateOnly(today.Year, today.Month, 18) : new DateOnly(today.Year, today.Month, 18).AddMonths(1);
+        sb.Append($"- Next due date (payment is due on the 18th): {due:dd/MM/yyyy}. Statement balance is not in the Monzo data.\n");
+
+        using (var c = _db.CreateCommand())
+        {
+            c.CommandText = "SELECT COUNT(*) FROM tx WHERE settled=0";
+            sb.Append($"\n## Pending\n- {c.ExecuteScalar()} pending transaction(s) not yet settled.\n");
+        }
+        return sb.ToString();
+    }
+
     private string Gaps(string account)
     {
         using var c = _db.CreateCommand();
