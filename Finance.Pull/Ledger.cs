@@ -100,6 +100,20 @@ public sealed class Ledger : IDisposable
     private const string NotSpend = "type NOT IN ('Pot transfer','Monzo-to-Monzo') AND category NOT IN ('Transfers','Savings') " +
                                     "AND LOWER(name) NOT LIKE '%american exp%' AND LOWER(name) NOT LIKE '%amex%'";
 
+    /// <summary>Rolling 30 days of payments by category (both accounts), as JSON rows for the Life dashboard.</summary>
+    public string Spend30Json(DateOnly today)
+    {
+        using var c = _db.CreateCommand();
+        c.CommandText = $"SELECT COALESCE(NULLIF(category,''),'Other'), COUNT(*), ROUND(SUM(-amount_minor)/100.0,2) FROM tx " +
+                        $"WHERE date>=$f AND date<=$t AND amount_minor<0 AND {NotSpend} GROUP BY 1 ORDER BY 3 DESC";
+        c.Parameters.AddWithValue("$f", today.AddDays(-29).ToString("yyyy-MM-dd"));
+        c.Parameters.AddWithValue("$t", today.ToString("yyyy-MM-dd"));
+        using var r = c.ExecuteReader();
+        var rows = new List<object>();
+        while (r.Read()) rows.Add(new { category = r.GetString(0), payments = r.GetInt64(1), amount = r.GetDecimal(2) });
+        return System.Text.Json.JsonSerializer.Serialize(rows);
+    }
+
     /// <summary>Short, human-readable status for the Morning Sweep to read.</summary>
     public string SummaryMarkdown(string statusJsonPath, DateOnly today)
     {
