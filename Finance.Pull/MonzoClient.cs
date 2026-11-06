@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 namespace Finance.Pull;
 
 public sealed record MonzoAccount(string Id, string Label);
+public sealed record MonzoPot(string Id, string Name, long BalanceMinor);
 
 public sealed record MonzoTx(
     string Id, DateTimeOffset Created, string Name, string Emoji, string Category, string Scheme,
@@ -95,11 +96,18 @@ public sealed class MonzoClient
         return list;
     }
 
-    public async Task<Dictionary<string, string>> GetPotNamesAsync(string accountId)
+    public async Task<List<MonzoPot>> GetPotsAsync(string accountId)
     {
         var j = await GetAsync($"/pots?current_account_id={accountId}");
         return j["pots"]!.AsArray().Where(p => (bool?)p!["deleted"] != true)
-            .ToDictionary(p => (string)p!["id"]!, p => (string)p!["name"]!);
+            .Select(p => new MonzoPot((string)p!["id"]!, (string)p["name"]!, (long?)p["balance"] ?? 0)).ToList();
+    }
+
+    /// <summary>Spendable balance of the current account (excludes pots), in pence.</summary>
+    public async Task<long> GetBalanceAsync(string accountId)
+    {
+        var j = await GetAsync($"/balance?account_id={accountId}");
+        return (long)j["balance"]!;
     }
 
     public async Task<List<MonzoTx>> GetTransactionsAsync(string accountId, DateTimeOffset since, Dictionary<string, string> pots)

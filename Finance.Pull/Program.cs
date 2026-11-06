@@ -45,14 +45,22 @@ async Task<int> PullAsync()
     var since = new DateTimeOffset(startLocal, DailyCsvWriter.London.GetUtcOffset(startLocal));
 
     var report = new List<object>();
+    var balances = new List<object>();
+    var asOf = DateTimeOffset.Now.ToString("o");
     foreach (var acct in await client.GetAccountsAsync())
     {
-        var pots = await client.GetPotNamesAsync(acct.Id);
+        var potList = await client.GetPotsAsync(acct.Id);
+        var pots = potList.ToDictionary(p => p.Id, p => p.Name);
+        balances.Add(new { account = acct.Label, kind = "current", name = "Current account", balance = await client.GetBalanceAsync(acct.Id) / 100m, as_of = asOf });
+        balances.AddRange(potList.Select(p => (object)new { account = acct.Label, kind = "pot", name = p.Name, balance = p.BalanceMinor / 100m, as_of = asOf }));
         var txs = await client.GetTransactionsAsync(acct.Id, since, pots);
         var files = DailyCsvWriter.Write(outDir, acct.Label, txs, days);
         Console.WriteLine($"{acct.Label}: {txs.Count} transactions, wrote {files.Count} file(s)");
         report.Add(new { account = acct.Label, transactions = txs.Count, files = files.Select(Path.GetFileName) });
     }
+    var balDir = Path.Combine(Path.GetDirectoryName(statusPath)!, "dash");
+    Directory.CreateDirectory(balDir);
+    File.WriteAllText(Path.Combine(balDir, "balances.json"), JsonSerializer.Serialize(balances));
     WriteStatus(true, "ok", report);
     return 0;
 }
